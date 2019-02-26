@@ -19,12 +19,12 @@ namespace Rubeus
 
     public class TGS_REQ
     {
-        public static byte[] NewTGSReq(string userName, string domain, string sname, Ticket providedTicket, byte[] clientKey, Interop.KERB_ETYPE etype, bool renew, string s4uUser = "")
+        public static byte[] NewTGSReq(string userName, string domain, string sname, Ticket providedTicket, byte[] clientKey, Interop.KERB_ETYPE paEType, Interop.KERB_ETYPE requestEType = Interop.KERB_ETYPE.subkey_keymaterial, bool renew = false, string s4uUser = "")
         {
             TGS_REQ req = new TGS_REQ();
 
             // create the PA-DATA that contains the AP-REQ w/ appropriate authenticator/etc.
-            PA_DATA padata = new PA_DATA(domain, userName, providedTicket, clientKey, etype);
+            PA_DATA padata = new PA_DATA(domain, userName, providedTicket, clientKey, paEType);
             req.padata.Add(padata);
 
             // set the username
@@ -34,9 +34,20 @@ namespace Rubeus
             req.req_body.realm = domain;
 
             // add in our encryption types
-            req.req_body.etypes.Add(Interop.KERB_ETYPE.aes128_cts_hmac_sha1);
-            req.req_body.etypes.Add(Interop.KERB_ETYPE.aes256_cts_hmac_sha1);
-            req.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac);
+            if (requestEType == Interop.KERB_ETYPE.subkey_keymaterial)
+            {
+                // normal behavior
+                req.req_body.etypes.Add(Interop.KERB_ETYPE.aes256_cts_hmac_sha1);
+                req.req_body.etypes.Add(Interop.KERB_ETYPE.aes128_cts_hmac_sha1);
+                req.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac);
+                req.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac_exp);
+                //req.req_body.etypes.Add(Interop.KERB_ETYPE.des_cbc_crc);
+            }
+            else
+            {
+                // add in the supported etype specified
+                req.req_body.etypes.Add(requestEType);
+            }
 
             if (!String.IsNullOrEmpty(s4uUser))
             {
@@ -48,17 +59,10 @@ namespace Rubeus
                 req.req_body.sname.name_string.Add(userName);
 
                 req.req_body.kdcOptions = req.req_body.kdcOptions | Interop.KdcOptions.ENCTKTINSKEY;
-
-                //req.req_body.etypes.Add(Interop.KERB_ETYPE.aes128_cts_hmac_sha1);
-                //req.req_body.etypes.Add(Interop.KERB_ETYPE.aes256_cts_hmac_sha1);
-                //req.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac);
             }
 
             else
             {
-                //// add in our encryption type
-                //req.req_body.etypes.Add(etype);
-
                 string[] parts = sname.Split('/');
                 if (parts.Length == 1)
                 {
@@ -96,7 +100,6 @@ namespace Rubeus
 
             return null;
         }
-
 
         public TGS_REQ()
         {

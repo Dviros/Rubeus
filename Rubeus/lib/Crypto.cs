@@ -1,6 +1,5 @@
 ﻿using System;
-using Asn1;
-using System.Text;
+using System.Linq;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.ComponentModel;
@@ -9,6 +8,75 @@ namespace Rubeus
 {
     public class Crypto
     {
+        public static void ComputeAllKerberosPasswordHashes(string password, string userName = "", string domainName = "")
+        {
+            // use KerberosPasswordHash() to calculate rc4_hmac, aes128_cts_hmac_sha1, aes256_cts_hmac_sha1, and des_cbc_md5 hashes for a given password
+
+            Console.WriteLine("\r\n[*] Action: Calculate Password Hashes\r\n");
+
+            Console.WriteLine("[*] Input password             : {0}", password);
+
+            string salt = String.Format("{0}{1}", domainName.ToUpper(), userName.ToLower());
+
+            if (!String.IsNullOrEmpty(userName) && !String.IsNullOrEmpty(domainName))
+            {
+                Console.WriteLine("[*] Input username             : {0}", userName);
+                Console.WriteLine("[*] Input domain               : {0}", domainName);
+                Console.WriteLine("[*] Salt                       : {0}", salt);
+            }
+
+            string rc4Hash = KerberosPasswordHash(Interop.KERB_ETYPE.rc4_hmac, password);
+            Console.WriteLine("[*]       rc4_hmac             : {0}", rc4Hash);
+
+            if (String.IsNullOrEmpty(userName) || String.IsNullOrEmpty(domainName))
+            {
+                Console.WriteLine("\r\n[!] /user:X and /domain:Y need to be supplied to calculate AES and DES hash types!");
+            }
+            else
+            {
+                string aes128Hash = KerberosPasswordHash(Interop.KERB_ETYPE.aes128_cts_hmac_sha1, password, salt);
+                Console.WriteLine("[*]       aes128_cts_hmac_sha1 : {0}", aes128Hash);
+
+                string aes256Hash = KerberosPasswordHash(Interop.KERB_ETYPE.aes256_cts_hmac_sha1, password, salt);
+                Console.WriteLine("[*]       aes256_cts_hmac_sha1 : {0}", aes256Hash);
+
+                string desHash = KerberosPasswordHash(Interop.KERB_ETYPE.des_cbc_md5, String.Format("{0}{1}", password, salt), salt);
+                Console.WriteLine("[*]       des_cbc_md5          : {0}", desHash);
+            }
+
+            Console.WriteLine();
+        }
+
+        public static string KerberosPasswordHash(Interop.KERB_ETYPE etype, string password, string salt = "", int count = 4096)
+        {
+            // use the internal KERB_ECRYPT HashPassword() function to calculate a password hash of a given etype
+            // adapted from @gentilkiwi's Mimikatz "kerberos::hash" implementation
+
+            Interop.KERB_ECRYPT pCSystem;
+            IntPtr pCSystemPtr;
+
+            // locate the crypto system for the hash type we want
+            int status = Interop.CDLocateCSystem(etype, out pCSystemPtr);
+
+            pCSystem = (Interop.KERB_ECRYPT)System.Runtime.InteropServices.Marshal.PtrToStructure(pCSystemPtr, typeof(Interop.KERB_ECRYPT));
+            if (status != 0)
+                throw new System.ComponentModel.Win32Exception(status, "Error on CDLocateCSystem");
+
+            // get the delegate for the password hash function
+            Interop.KERB_ECRYPT_HashPassword pCSystemHashPassword = (Interop.KERB_ECRYPT_HashPassword)System.Runtime.InteropServices.Marshal.GetDelegateForFunctionPointer(pCSystem.HashPassword, typeof(Interop.KERB_ECRYPT_HashPassword));
+            Interop.UNICODE_STRING passwordUnicode = new Interop.UNICODE_STRING(password);
+            Interop.UNICODE_STRING saltUnicode = new Interop.UNICODE_STRING(salt);
+
+            byte[] output = new byte[pCSystem.KeySize];
+
+            int success = pCSystemHashPassword(passwordUnicode, saltUnicode, count, output);
+
+            if (status != 0)
+                throw new Win32Exception(status);
+
+            return System.BitConverter.ToString(output).Replace("-", "");
+        }
+
         // Adapted from Vincent LE TOUX' "MakeMeEnterpriseAdmin"
         public static byte[] KerberosChecksum(byte[] key, byte[] data)
         {

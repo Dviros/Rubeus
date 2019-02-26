@@ -4,9 +4,9 @@ using System.Collections.Generic;
 
 namespace Rubeus.Commands
 {
-    public class Purge : ICommand
+    public class Klist : ICommand
     {
-        public static string CommandName => "purge";
+        public static string CommandName => "klist";
 
         public void Execute(Dictionary<string, string> arguments)
         {
@@ -25,9 +25,7 @@ namespace Rubeus.Commands
                 }
             }
 
-            Console.WriteLine("Luid: {0}", luid);
-
-            LSA.Purge(luid);
+            LSA.ListKerberosTickets(luid);
         }
     }
 }

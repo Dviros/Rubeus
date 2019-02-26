@@ -12,10 +12,11 @@ namespace Rubeus.Commands
         {
             string user = "";
             string domain = "";
+            string password = "";
             string hash = "";
             string dc = "";
             bool ptt = false;
-            uint luid = 0;
+            Interop.LUID luid = new Interop.LUID();
             Interop.KERB_ETYPE encType = Interop.KERB_ETYPE.subkey_keymaterial;
 
             if (arguments.ContainsKey("/user"))
@@ -39,16 +40,64 @@ namespace Rubeus.Commands
             {
                 dc = arguments["/dc"];
             }
-            if (arguments.ContainsKey("/rc4"))
+
+            if (arguments.ContainsKey("/password"))
+            {
+                password = arguments["/password"];
+
+                string salt = String.Format("{0}{1}", domain.ToUpper(), user.ToLower());
+                encType = Interop.KERB_ETYPE.rc4_hmac; //default is non /enctype is specified
+
+                if (arguments.ContainsKey("/enctype"))
+                {
+                    string encTypeString = arguments["/enctype"].ToUpper();
+
+                    if (encTypeString.Equals("RC4") || encTypeString.Equals("NTLM"))
+                    {
+                        encType = Interop.KERB_ETYPE.rc4_hmac;
+                    }
+                    else if (encTypeString.Equals("AES128"))
+                    {
+                        encType = Interop.KERB_ETYPE.aes128_cts_hmac_sha1;
+                    }
+                    else if (encTypeString.Equals("AES256") || encTypeString.Equals("AES"))
+                    {
+                        encType = Interop.KERB_ETYPE.aes256_cts_hmac_sha1;
+                    }
+                    else if (encTypeString.Equals("DES"))
+                    {
+                        encType = Interop.KERB_ETYPE.des_cbc_md5;
+                    }
+                }
+                hash = Crypto.KerberosPasswordHash(encType, password, salt);
+            }
+
+            else if (arguments.ContainsKey("/des"))
+            {
+                hash = arguments["/des"];
+                encType = Interop.KERB_ETYPE.des_cbc_md5;
+            }
+            else if (arguments.ContainsKey("/rc4"))
             {
                 hash = arguments["/rc4"];
                 encType = Interop.KERB_ETYPE.rc4_hmac;
             }
-            if (arguments.ContainsKey("/aes256"))
+            else if (arguments.ContainsKey("/ntlm"))
+            {
+                hash = arguments["/ntlm"];
+                encType = Interop.KERB_ETYPE.rc4_hmac;
+            }
+            else if (arguments.ContainsKey("/aes128"))
+            {
+                hash = arguments["/aes128"];
+                encType = Interop.KERB_ETYPE.aes128_cts_hmac_sha1;
+            }
+            else if (arguments.ContainsKey("/aes256"))
             {
                 hash = arguments["/aes256"];
                 encType = Interop.KERB_ETYPE.aes256_cts_hmac_sha1;
             }
+
             if (arguments.ContainsKey("/ptt"))
             {
                 ptt = true;
@@ -58,19 +107,12 @@ namespace Rubeus.Commands
             {
                 try
                 {
-                    luid = UInt32.Parse(arguments["/luid"]);
+                    luid = new Interop.LUID(arguments["/luid"]);
                 }
                 catch
                 {
-                    try
-                    {
-                        luid = Convert.ToUInt32(arguments["/luid"], 16);
-                    }
-                    catch
-                    {
-                        Console.WriteLine("[X] Invalid LUID format ({0})\r\n", arguments["/LUID"]);
-                        return;
-                    }
+                    Console.WriteLine("[X] Invalid LUID format ({0})\r\n", arguments["/luid"]);
+                    return;
                 }
             }
 
@@ -104,18 +146,18 @@ namespace Rubeus.Commands
             }
             if (String.IsNullOrEmpty(hash))
             {
-                Console.WriteLine("\r\n[X] You must supply a /rc4 or /aes256 hash!\r\n");
+                Console.WriteLine("\r\n[X] You must supply a /password , or a [/des|/rc4|/aes128|/aes256] hash!\r\n");
                 return;
             }
 
-            if (!((encType == Interop.KERB_ETYPE.rc4_hmac) || (encType == Interop.KERB_ETYPE.aes256_cts_hmac_sha1)))
+            if (!((encType == Interop.KERB_ETYPE.des_cbc_md5) || (encType == Interop.KERB_ETYPE.rc4_hmac) || (encType == Interop.KERB_ETYPE.aes128_cts_hmac_sha1) || (encType == Interop.KERB_ETYPE.aes256_cts_hmac_sha1)))
             {
-                Console.WriteLine("\r\n[X] Only /rc4 and /aes256 are supported at this time.\r\n");
+                Console.WriteLine("\r\n[X] Only /des, /rc4, /aes128, and /aes256 are supported at this time.\r\n");
                 return;
             }
             else
             {
-                Ask.TGT(user, domain, hash, encType, ptt, dc, luid);
+                Ask.TGT(user, domain, hash, encType, ptt, dc, luid, true);
                 return;
             }
         }

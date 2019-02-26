@@ -4,13 +4,15 @@ using System.Collections.Generic;
 
 namespace Rubeus.Commands
 {
-    public class Purge : ICommand
+    public class Triage : ICommand
     {
-        public static string CommandName => "purge";
+        public static string CommandName => "triage";
 
         public void Execute(Dictionary<string, string> arguments)
         {
             Interop.LUID luid = new Interop.LUID();
+            string user = "";
+            string service = "";
 
             if (arguments.ContainsKey("/luid"))
             {
@@ -24,10 +26,16 @@ namespace Rubeus.Commands
                     return;
                 }
             }
+            if (arguments.ContainsKey("/user"))
+            {
+                user = arguments["/user"];
+            }
+            if (arguments.ContainsKey("/service"))
+            {
+                service = arguments["/service"];
+            }
 
-            Console.WriteLine("Luid: {0}", luid);
-
-            LSA.Purge(luid);
+            LSA.TriageKerberosTickets(luid, user, service);
         }
     }
 }

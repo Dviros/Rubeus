@@ -96,6 +96,17 @@ namespace Rubeus
             subkey_keymaterial = 65
         }
 
+        [Flags]
+        public enum SUPPORTED_ETYPE : Int32
+        {
+            RC4_HMAC_DEFAULT = 0x0,
+            DES_CBC_CRC = 0x1,
+            DES_CBC_MD5 = 0x2,
+            RC4_HMAC = 0x4,
+            AES128_CTS_HMAC_SHA1_96 = 0x08,
+            AES256_CTS_HMAC_SHA1_96 = 0x10
+        }
+
         public enum KADMIN_PASSWD_ERR : UInt32
         {
             KRB5_KPASSWD_SUCCESS = 0,
@@ -530,7 +541,7 @@ namespace Rubeus
             public IntPtr Encrypt;
             public IntPtr Decrypt;
             public IntPtr Finish;
-            IntPtr HashPassword;
+            public IntPtr HashPassword;
             IntPtr RandomKey;
             IntPtr Control;
             IntPtr unk0_null;
@@ -598,32 +609,78 @@ namespace Rubeus
         [StructLayout(LayoutKind.Sequential)]
         public struct LUID
         {
-            public uint LowPart;
-            public int HighPart;
+            public UInt32 LowPart;
+            public Int32 HighPart;
+
+            public LUID(UInt64 value)
+            {
+                LowPart = (UInt32)(value & 0xffffffffL);
+                HighPart = (Int32)(value >> 32);
+            }
+
+            public LUID(LUID value)
+            {
+                LowPart = value.LowPart;
+                HighPart = value.HighPart;
+            }
+
+            public LUID(string value)
+            {
+                if (System.Text.RegularExpressions.Regex.IsMatch(value, @"^0x[0-9A-Fa-f]+$"))
+                {
+                    // if the passed LUID string is of form 0xABC123
+                    UInt64 uintVal = Convert.ToUInt64(value, 16);
+                    LowPart = (UInt32)(uintVal & 0xffffffffL);
+                    HighPart = (Int32)(uintVal >> 32);
+                }
+                else if (System.Text.RegularExpressions.Regex.IsMatch(value, @"^\d+$"))
+                {
+                    // if the passed LUID string is a decimal form
+                    UInt64 uintVal = UInt64.Parse(value);
+                    LowPart = (UInt32)(uintVal & 0xffffffffL);
+                    HighPart = (Int32)(uintVal >> 32);
+                }
+                else
+                {
+                    System.ArgumentException argEx = new System.ArgumentException("Passed LUID string value is not in a hex or decimal form", value);
+                    throw argEx;
+                }
+            }
+
+            public override int GetHashCode()
+            {
+                UInt64 Value = ((UInt64)this.HighPart << 32) + this.LowPart;
+                return Value.GetHashCode();
+            }
+
+            public override bool Equals(object obj)
+            {
+                return obj is LUID && (((ulong)this) == (LUID) obj);
+            }
+
+            public override string ToString()
+            {
+                UInt64 Value = ((UInt64)this.HighPart << 32) + this.LowPart;
+                return String.Format("0x{0:x}", (ulong)Value);
+            }
+
+            public static bool operator ==(LUID x, LUID y)
+            {
+                return (((ulong)x) == ((ulong)y));
+            }
+
+            public static bool operator !=(LUID x, LUID y)
+            {
+                return (((ulong)x) != ((ulong)y));
+            }
+
+            public static implicit operator ulong(LUID luid)
+            {
+                // enable casting to a ulong
+                UInt64 Value = ((UInt64)luid.HighPart << 32);
+                return Value + luid.LowPart;
+            }
         }
-
-        //[StructLayout(LayoutKind.Sequential)]
-        //public struct SECURITY_HANDLE
-        //{
-        //    public IntPtr LowPart;
-        //    public IntPtr HighPart;
-        //    public SECURITY_HANDLE(int dummy)
-        //    {
-        //        LowPart = HighPart = IntPtr.Zero;
-        //    }
-        //};
-
-        //[StructLayout(LayoutKind.Sequential)]
-        //public struct SECURITY_INTEGER
-        //{
-        //    public uint LowPart;
-        //    public int HighPart;
-        //    public SECURITY_INTEGER(int dummy)
-        //    {
-        //        LowPart = 0;
-        //        HighPart = 0;
-        //    }
-        //};
 
         [StructLayout(LayoutKind.Sequential)]
         public struct LSA_STRING_IN
@@ -734,7 +791,6 @@ namespace Rubeus
         {
             public KERB_PROTOCOL_MESSAGE_TYPE MessageType;
             public int CountOfTickets;
-            // public KERB_TICKET_CACHE_INFO[] Tickets;
             public IntPtr Tickets;
         }
 
@@ -751,13 +807,27 @@ namespace Rubeus
         }
 
         [StructLayout(LayoutKind.Sequential)]
+        public struct KERB_TICKET_CACHE_INFO_EX
+        {
+            public LSA_STRING_OUT ClientName;
+            public LSA_STRING_OUT ClientRealm;
+            public LSA_STRING_OUT ServerName;
+            public LSA_STRING_OUT ServerRealm;
+            public Int64 StartTime;
+            public Int64 EndTime;
+            public Int64 RenewTime;
+            public Int32 EncryptionType;
+            public UInt32 TicketFlags;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
         public struct KERB_EXTERNAL_NAME
         {
             public Int16 NameType;
             public UInt16 NameCount;
 
             [MarshalAs(UnmanagedType.ByValArray,
-                SizeConst = 2)]
+                SizeConst = 3)]
             public LSA_STRING_OUT[] Names;
             //public LSA_STRING_OUT[] Names;
         }
@@ -832,6 +902,12 @@ namespace Rubeus
             public uint GroupCount;
             public uint PrivilegeCount;
             public LUID ModifiedId;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct TOKEN_ORIGIN
+        {
+            public LUID OriginatingLogonSession;
         }
 
         // the following are adapted from https://www.pinvoke.net/default.aspx/secur32.InitializeSecurityContext
@@ -1091,6 +1167,8 @@ namespace Rubeus
         public delegate int KERB_ECRYPT_Encrypt(IntPtr pContext, byte[] data, int dataSize, byte[] output, ref int outputSize);
         public delegate int KERB_ECRYPT_Decrypt(IntPtr pContext, byte[] data, int dataSize, byte[] output, ref int outputSize);
         public delegate int KERB_ECRYPT_Finish(ref IntPtr pContext);
+
+        public delegate int KERB_ECRYPT_HashPassword(UNICODE_STRING Password, UNICODE_STRING Salt, int count, byte[] output);
 
         //https://github.com/vletoux/MakeMeEnterpriseAdmin/blob/master/MakeMeEnterpriseAdmin.ps1#L1760-L1767
         public delegate int KERB_CHECKSUM_Initialize(int unk0, out IntPtr pContext);

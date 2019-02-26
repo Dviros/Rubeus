@@ -13,6 +13,12 @@ namespace Rubeus.Commands
             string spn = "";
             string user = "";
             string OU = "";
+            string outFile = "";
+            string domain = "";
+            string dc = "";
+            string supportedEType = "rc4";
+            bool useTGTdeleg = false;
+            KRB_CRED TGT = null;
 
             if (arguments.ContainsKey("/spn"))
             {
@@ -25,6 +31,50 @@ namespace Rubeus.Commands
             if (arguments.ContainsKey("/ou"))
             {
                 OU = arguments["/ou"];
+            }
+            if (arguments.ContainsKey("/domain"))
+            {
+                domain = arguments["/domain"];
+            }
+            if (arguments.ContainsKey("/dc"))
+            {
+                dc = arguments["/dc"];
+            }
+            if (arguments.ContainsKey("/outfile"))
+            {
+                outFile = arguments["/outfile"];
+            }
+            if (arguments.ContainsKey("/aes"))
+            {
+                supportedEType = "aes";
+            }
+            if (arguments.ContainsKey("/rc4opsec"))
+            {
+                supportedEType = "rc4opsec";
+            }
+            if (arguments.ContainsKey("/ticket"))
+            {
+                string kirbi64 = arguments["/ticket"];
+
+                if (Helpers.IsBase64String(kirbi64))
+                {
+                    byte[] kirbiBytes = Convert.FromBase64String(kirbi64);
+                    TGT = new KRB_CRED(kirbiBytes);
+                }
+                else if (System.IO.File.Exists(kirbi64))
+                {
+                    byte[] kirbiBytes = System.IO.File.ReadAllBytes(kirbi64);
+                    TGT = new KRB_CRED(kirbiBytes);
+                }
+                else
+                {
+                    Console.WriteLine("\r\n[X] /ticket:X must either be a .kirbi file or a base64 encoded .kirbi\r\n");
+                }
+            }
+
+            if (arguments.ContainsKey("/usetgtdeleg") || arguments.ContainsKey("/tgtdeleg"))
+            {
+                useTGTdeleg = true;
             }
 
             if (arguments.ContainsKey("/creduser"))
@@ -49,11 +99,11 @@ namespace Rubeus.Commands
 
                 System.Net.NetworkCredential cred = new System.Net.NetworkCredential(userName, password, domainName);
 
-                Roast.Kerberoast(spn, user, OU, cred);
+                Roast.Kerberoast(spn, user, OU, domain, dc, cred, outFile, TGT, useTGTdeleg, supportedEType);
             }
             else
             {
-                Roast.Kerberoast(spn, user, OU);
+                Roast.Kerberoast(spn, user, OU, domain, dc, null, outFile, TGT, useTGTdeleg, supportedEType);
             }
         }
     }
